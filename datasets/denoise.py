@@ -15,6 +15,8 @@ import tensorflow as tf
 
 import datasets
 
+import glob
+
 NUM_CHANNELS = 1
 
 
@@ -28,12 +30,12 @@ def update_argparser(parser):
   parser.add_argument(
       '--train-patch-size',
       help='Number of pixels in height or width of patches',
-      default=43,
+      default=128,
       type=int)
   parser.add_argument(
       '--eval-patch-size',
       help='Number of pixels in height or width of patches',
-      default=43,
+      default=128,
       type=int)
   parser.add_argument(
       '--train-flist',
@@ -41,8 +43,18 @@ def update_argparser(parser):
       type=str,
       required=True)
   parser.add_argument(
+      '--input-train-flist',
+      help='location of input files models',
+      type=str,
+      required=True)
+  parser.add_argument(
       '--eval-flist',
       help='GCS location to write checkpoints and export models',
+      type=str,
+      required=True)
+  parser.add_argument(
+      '--input-eval-flist',
+      help='location of input eval files',
       type=str,
       required=True)
   parser.set_defaults(
@@ -58,25 +70,32 @@ def _extract(mode, params):
       tf.estimator.ModeKeys.TRAIN: params.train_flist,
       tf.estimator.ModeKeys.EVAL: params.eval_flist,
   }[mode]
-  with open(flist) as f:
+  input_flist = {
+      tf.estimator.ModeKeys.TRAIN: params.input_train_flist,
+      tf.estimator.ModeKeys.EVAL: params.input_eval_flist,
+  }[mode]
+  with open(flist) as f, open(input_flist) as inp_f:
     image_files = f.read().splitlines()
-  dataset = tf.data.Dataset.from_tensor_slices((image_files,))
+    input_files = inp_f.read().splitlines()
+  dataset = tf.data.Dataset.from_tensor_slices((image_files,input_files))
 
   dataset = dataset.map(
-      tf.read_file,
+          lambda x,y: (tf.read_file(x), tf.read_file(y)),
       num_parallel_calls=params.num_data_threads,
   )
+
   dataset = dataset.cache()
 
-  def _decode_image(image_file):
-    image = tf.image.decode_png(image_file, channels=params.num_channels)
-    return image
+  def _decode_image(target_file,source_file):
+    target_image = tf.image.decode_jpeg(target_file, channels=params.num_channels)
+    source_image = tf.image.decode_jpeg(source_file, channels=params.num_channels)
+    return target_image, source_image
 
   dataset = dataset.map(
       _decode_image,
       num_parallel_calls=params.num_data_threads,
   )
-
+  
   return dataset
 
 
@@ -85,33 +104,32 @@ def _transform(dataset, mode, params):
     dataset = dataset.shuffle(params.shuffle_buffer_size)
     dataset = dataset.repeat()
 
-  def _preprocess(target):
+  def _preprocess(trgt,src):
     if mode == tf.estimator.ModeKeys.TRAIN:
-      target = tf.image.random_crop(
-          target, [params.train_patch_size, params.train_patch_size, 1])
-      target = tf.image.random_flip_left_right(target)
-      target = tf.image.random_flip_up_down(target)
-      pred = tf.less(
-          tf.random_uniform(shape=[], minval=0., maxval=1., dtype=tf.float32),
-          0.5)
-      target = tf.cond(pred, lambda: tf.image.rot90(target), lambda: target)
+      target_src = tf.image.random_crop([trgt,src], [2,params.train_patch_size, params.train_patch_size, 1])
+      target = target_src[0]
+      source = target_src[1]
+      #target = tf.image.random_flip_left_right(target)
+      #target = tf.image.random_flip_up_down(target)
+      #pred = tf.less(
+      #    tf.random_uniform(shape=[], minval=0., maxval=1., dtype=tf.float32),
+      #    0.5)
+      #target = tf.cond(pred, lambda: tf.image.rot90(target), lambda: target)
     else:
-      target = tf.image.resize_image_with_crop_or_pad(
-          target, params.eval_patch_size, params.eval_patch_size)
+      target = tf.image.resize_image_with_crop_or_pad(trgt, params.eval_patch_size, params.eval_patch_size)
+      source = tf.image.resize_image_with_crop_or_pad(src , params.eval_patch_size, params.eval_patch_size)
 
     target = tf.image.convert_image_dtype(target, tf.float32)
-    source = target + tf.random.normal(
-        tf.shape(target),
-        mean=0,
-        stddev=params.noise_sigma / 255.0,
-        seed=None if mode == tf.estimator.ModeKeys.TRAIN else 0)
+    source = tf.image.convert_image_dtype(source, tf.float32)
+    #source = target + tf.random.normal(
+    #    tf.shape(target),
+    #    mean=0,
+    #    stddev=params.noise_sigma / 255.0,
+    #    seed=None if mode == tf.estimator.ModeKeys.TRAIN else 0)
 
     return {'source': source}, {'target': target}
 
-  dataset = dataset.map(
-      _preprocess,
-      num_parallel_calls=params.num_data_threads,
-  )
+  dataset = dataset.map( _preprocess, num_parallel_calls=params.num_data_threads)
   batch_size = {
       tf.estimator.ModeKeys.TRAIN: params.train_batch_size,
       tf.estimator.ModeKeys.EVAL: params.eval_batch_size,
@@ -124,8 +142,7 @@ def _transform(dataset, mode, params):
   return dataset
 
 
-input_fn = lambda mode, params: (
-    datasets.input_fn_tplt(mode, params, extract=_extract, transform=_transform))
+input_fn = lambda mode, params: (datasets.input_fn_tplt(mode, params, extract=_extract, transform=_transform))
 
 
 def predict_input_fn():
@@ -140,6 +157,14 @@ def predict_input_fn():
           tf.saved_model.signature_constants.PREDICT_INPUTS: input_tensor
       })
 
+def psnr(im1, im2):
+    im1_uint8 = np.rint(np.clip(im1 * 255, 0, 255))
+    im2_uint8 = np.rint(np.clip(im2 * 255, 0, 255))
+    diff = np.abs(im1_uint8 - im2_uint8).flatten()
+    rmse = np.sqrt(np.mean(np.square(diff)))
+    psnr = 20 * np.log10(255.0 / rmse)
+    print(psnr)
+    return psnr
 
 def test_saved_model():
   parser = argparse.ArgumentParser()
@@ -157,7 +182,7 @@ def test_saved_model():
   parser.add_argument(
       '--patch-size',
       help='Number of pixels in height or width of patches',
-      default=43,
+      default=128,
       type=int)
   args = parser.parse_args()
 
@@ -166,21 +191,22 @@ def test_saved_model():
         sess, [tf.saved_model.tag_constants.SERVING], args.model_dir)
     signature_def = metagraph_def.signature_def[
         tf.saved_model.signature_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY]
-    input_tensor = sess.graph.get_tensor_by_name(
-        signature_def.inputs['inputs'].name)
-    output_tensor = sess.graph.get_tensor_by_name(
-        signature_def.outputs['output'].name)
+    input_tensor = sess.graph.get_tensor_by_name(signature_def.inputs['inputs'].name)
+    output_tensor = sess.graph.get_tensor_by_name(signature_def.outputs['output'].name)
     if not os.path.isdir(args.output_dir):
       os.makedirs(args.output_dir)
     psnr_list = []
-    for input_file in os.listdir(args.input_dir):
-      print(input_file)
+    noise_files = sorted(glob.glob(args.input_dir+'/input*'))
+    for find, input_file in enumerate(sorted(glob.glob(args.input_dir+'/target*'))): #os.listdir(args.input_dir):
+      #print(input_file)
       sha = sha256(input_file.encode('utf-8'))
       seed = np.frombuffer(sha.digest(), dtype='uint32')
       rstate = np.random.RandomState(seed)
 
-      output_file = os.path.join(args.output_dir, input_file)
-      input_file = os.path.join(args.input_dir, input_file)
+      #output_file = os.path.join(args.output_dir, input_file)
+      output_file = input_file.replace(args.input_dir,args.output_dir)
+      #input_file = os.path.join(args.input_dir, input_file)
+      #print('Input: '+input_file)
       input_image = np.asarray(Image.open(input_file))
       input_image = input_image.astype(np.float32) / 255.0
 
@@ -188,7 +214,7 @@ def test_saved_model():
         images = output_tensor.eval(feed_dict={input_tensor: images})
         return images
 
-      stride = 7
+      stride = 128
       h_idx_list = list(
           range(0, input_image.shape[0] - args.patch_size,
                 stride)) + [input_image.shape[0] - args.patch_size]
@@ -197,8 +223,15 @@ def test_saved_model():
                 stride)) + [input_image.shape[1] - args.patch_size]
       output_image = np.zeros(input_image.shape)
       overlap = np.zeros(input_image.shape)
-      noise_image = input_image + rstate.normal(0, args.noise_sigma / 255.0,
-                                                input_image.shape)
+      #noise_image = input_image + rstate.normal(0, args.noise_sigma / 255.0,
+      #                                          input_image.shape)
+      noise_file = noise_files[find]
+      print(noise_file, input_file)
+      #print('Target: '+noise_file)
+      noise_image = np.asarray(Image.open(noise_file))
+      noise_image = noise_image.astype(np.float32) / 255.0
+      formatted_noise_img = np.expand_dims(np.expand_dims(noise_image[:,:,0],0),4)
+      sample_res =  forward_images(formatted_noise_img[:,:128,:128,:])
       for h_idx in h_idx_list:
         for w_idx in w_idx_list:
           # print(h_idx, w_idx)
@@ -206,22 +239,16 @@ def test_saved_model():
                                     w_idx + args.patch_size]
           input_patch = np.expand_dims(input_patch, axis=-1)
           input_patch = np.expand_dims(input_patch, axis=0)
-          output_patch = forward_images(input_patch)
+          output_patch = forward_images(input_patch[:,:,:,0,:])
           output_patch = output_patch[0, :, :, 0]
-          output_image[h_idx:h_idx + args.patch_size, w_idx:
-                       w_idx + args.patch_size] += output_patch
-          overlap[h_idx:h_idx + args.patch_size, w_idx:
-                  w_idx + args.patch_size] += 1
+          print('{} {} output_image: {} output patch {}'.format(h_idx,w_idx,str(output_image.shape),str(output_patch.shape)))
+          output_image[h_idx:h_idx + args.patch_size, w_idx: w_idx + args.patch_size] +=  np.tile(np.expand_dims(output_patch,2),(1,1,3))
+          overlap[h_idx:h_idx + args.patch_size, w_idx:w_idx + args.patch_size] += 1
+      print('computation finished')
+      import pdb
+      pdb.set_trace()
       output_image /= overlap
 
-      def psnr(im1, im2):
-        im1_uint8 = np.rint(np.clip(im1 * 255, 0, 255))
-        im2_uint8 = np.rint(np.clip(im2 * 255, 0, 255))
-        diff = np.abs(im1_uint8 - im2_uint8).flatten()
-        rmse = np.sqrt(np.mean(np.square(diff)))
-        psnr = 20 * np.log10(255.0 / rmse)
-        print(psnr)
-        return psnr
 
       psnr_list.append(psnr(output_image, input_image))
       output_image = np.around(output_image * 255.0).astype(np.uint8)

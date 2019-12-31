@@ -1,0 +1,1 @@
+python trainer.py --dataset denoise --train-flist data/phacou_target_train.flist --input-train-flist data/phacou_input_train.flist --eval-flist data/phacou_target_test.flist --input-eval-flist data/phacou_input_test.flist --model nlrn --job-dir debug  >> training_log.txt 2>&1

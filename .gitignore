@@ -102,3 +102,8 @@ ENV/
 
 # vscode
 .vscode/
+
+# photoacoustic extras
+data
+debug*
+./*.txt # log files

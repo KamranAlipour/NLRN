@@ -112,37 +112,12 @@ if __name__ == '__main__':
   session_config = tf.ConfigProto()
   session_config.gpu_options.allow_growth = hparams.allow_growth
   if hparams.xla:
-    session_config.graph_options.optimizer_options.global_jit_level = (
-        tf.OptimizerOptions.ON_1)
-  run_config = tf.estimator.RunConfig(
-      model_dir=hparams.job_dir,
-      tf_random_seed=hparams.random_seed,
-      save_summary_steps=hparams.save_summary_steps,
-      save_checkpoints_steps=hparams.save_checkpoints_steps,
-      session_config=session_config,
-  )
-  estimator = tf.estimator.Estimator(
-      model_fn=model_fn,
-      config=run_config,
-      params=hparams,
-  )
+    session_config.graph_options.optimizer_options.global_jit_level = (tf.OptimizerOptions.ON_1)
+  run_config = tf.estimator.RunConfig( model_dir=hparams.job_dir, tf_random_seed=hparams.random_seed, save_summary_steps=hparams.save_summary_steps,  save_checkpoints_steps=hparams.save_checkpoints_steps,  session_config=session_config)
+  estimator = tf.estimator.Estimator( model_fn=model_fn, config=run_config, params=hparams)
   hooks = []
   if hparams.save_profiling_steps:
-    hooks.append(
-        tf.train.ProfilerHook(
-            save_steps=hparams.save_profiling_steps,
-            output_dir=hparams.job_dir,
-        ))
-  train_spec = tf.estimator.TrainSpec(
-      input_fn=train_input_fn,
-      max_steps=hparams.train_steps,
-      hooks=hooks,
-  )
-  eval_spec = tf.estimator.EvalSpec(
-      input_fn=eval_input_fn,
-      steps=hparams.eval_steps,
-      exporters=tf.estimator.LatestExporter(
-          name='Servo', serving_input_receiver_fn=predict_input_fn)
-      if predict_input_fn else None,
-  )
+    hooks.append( tf.train.ProfilerHook( save_steps=hparams.save_profiling_steps,  output_dir=hparams.job_dir ))
+  train_spec = tf.estimator.TrainSpec( input_fn=train_input_fn, max_steps=hparams.train_steps, hooks=hooks)
+  eval_spec = tf.estimator.EvalSpec(input_fn=eval_input_fn, steps=hparams.eval_steps, exporters=tf.estimator.LatestExporter(name='Servo', serving_input_receiver_fn=predict_input_fn) if predict_input_fn else None)
   tf.estimator.train_and_evaluate(estimator, train_spec, eval_spec)

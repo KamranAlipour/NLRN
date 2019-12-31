@@ -98,8 +98,7 @@ def model_fn(features, labels, mode, params, config):
       }
     if mode == tf.estimator.ModeKeys.TRAIN:
       global_step = tf.train.get_or_create_global_step()
-      learning_rate = tf.train.piecewise_constant(
-          global_step, params.learning_rate[0], params.learning_rate[1])
+      learning_rate = tf.train.piecewise_constant(global_step, params.learning_rate[0], params.learning_rate[1])
       opt = tf.train.AdamOptimizer(learning_rate)
       update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
       with tf.control_dependencies(update_ops):
